@@ -33,7 +33,7 @@ sudo mv vms /usr/local/bin/
 vms --version
 ```
 
-The macOS binaries are not notarized. If macOS refuses to open a file that you downloaded with a browser, remove the quarantine attribute:
+The macOS binaries are not notarized. If you download the file with a browser, remove the quarantine attribute before you run it. If you do not, macOS can refuse to open it:
 
 ```bash
 xattr -d com.apple.quarantine /usr/local/bin/vms
