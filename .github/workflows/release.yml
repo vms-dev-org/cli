@@ -1,0 +1,246 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  DO_NOT_TRACK: "1"
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  build:
+    name: Build the binaries
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Read the version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The tag ${TAG} is not vX.Y.Z."
+            exit 1
+          fi
+          echo "version=${TAG#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Check out the source at cli/${{ github.ref_name }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vms-dev-org/vms.dev
+          ref: cli/${{ github.ref_name }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+
+      - name: Read the Bun version
+        id: bun
+        run: echo "version=$(jq -r '.devEngines.packageManager.version' source/package.json)" >>"$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+
+      - name: Check the version of apps/cli
+        working-directory: source
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          source_version="$(jq -r .version apps/cli/package.json)"
+          if [[ "$source_version" != "$VERSION" ]]; then
+            echo "::error::apps/cli/package.json has the version ${source_version}, not ${VERSION}."
+            exit 1
+          fi
+
+      - name: Install the dependencies
+        working-directory: source
+        run: bun install --frozen-lockfile
+
+      - name: Build the binaries
+        working-directory: source
+        run: bunx turbo run compile --filter=cli
+
+      - name: Sign the macOS binaries ad hoc
+        working-directory: source/apps/cli/dist
+        run: |
+          for binary in vms-darwin-arm64 vms-darwin-x64; do
+            codesign --verify "$binary" 2>/dev/null || codesign --force --sign - "$binary"
+            codesign --verify "$binary"
+          done
+
+      - name: Check the binary for this runner
+        working-directory: source/apps/cli/dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: test "$(./vms-darwin-arm64 --version)" = "$VERSION"
+
+      - name: Write the SHA-256 sums
+        working-directory: source/apps/cli/dist
+        run: shasum -a 256 vms-darwin-arm64 vms-darwin-x64 vms-linux-x64 >SHA256SUMS
+
+      - name: Upload the binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries
+          path: |
+            source/apps/cli/dist/vms-darwin-arm64
+            source/apps/cli/dist/vms-darwin-x64
+            source/apps/cli/dist/vms-linux-x64
+            source/apps/cli/dist/SHA256SUMS
+          if-no-files-found: error
+
+  check-linux:
+    name: Check the Linux binary
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+
+      - name: Run vms --version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          sha256sum -c SHA256SUMS
+          chmod +x vms-linux-x64
+          test "$(./vms-linux-x64 --version)" = "$VERSION"
+
+  release:
+    name: Make the GitHub release
+    needs: [build, check-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+
+      - name: Make the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cat >notes.md <<'NOTES'
+          Install with Homebrew:
+
+          ```bash
+          brew install vms-dev-org/tap/vms
+          ```
+
+          Or download the binary for your computer, and check it with `SHA256SUMS`. See the [install steps](https://vms.dev/docs/reference/cli#install).
+          NOTES
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "vms ${VERSION}" \
+            --notes-file notes.md \
+            vms-darwin-arm64 vms-darwin-x64 vms-linux-x64 SHA256SUMS
+
+  homebrew:
+    name: Update the Homebrew formula
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: cli
+
+      - name: Check out the tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vms-dev-org/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Download the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: binaries
+
+      - name: Write and push Formula/vms.rb
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          mkdir -p tap/Formula
+          bash cli/scripts/formula.sh "$VERSION" binaries/SHA256SUMS >tap/Formula/vms.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/vms.rb
+          if git diff --cached --quiet; then
+            echo "Formula/vms.rb has no change."
+            exit 0
+          fi
+          git commit -m "vms ${VERSION}"
+          git push origin HEAD
+
+  npm:
+    name: Publish the npm packages
+    needs: [build, release]
+    if: vars.NPM_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: cli
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@^11.15.0
+
+      - name: Download the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: binaries
+
+      - name: Write the packages
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash cli/scripts/npm-packages.sh "$VERSION" binaries packages
+
+      - name: Publish the packages
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          for folder in cli-darwin-arm64 cli-darwin-x64 cli-linux-x64 cli; do
+            name="$(jq -r .name "packages/${folder}/package.json")"
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION} is already on npm."
+              continue
+            fi
+            npm publish "packages/${folder}" --provenance --access public
+          done
