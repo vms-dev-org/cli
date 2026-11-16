@@ -39,12 +39,6 @@ The macOS binaries are not notarized. If macOS refuses to open a file that you d
 xattr -d com.apple.quarantine /usr/local/bin/vms
 ```
 
-### npm
-
-```bash
-npm install -g @vms.dev/cli
-```
-
 ## Releases
 
 The workflow `.github/workflows/release.yml` makes each release from a `v*` tag:
