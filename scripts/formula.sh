@@ -26,6 +26,9 @@ sum_of() {
 darwin_arm64="$(sum_of vms-darwin-arm64)"
 darwin_x64="$(sum_of vms-darwin-x64)"
 linux_x64="$(sum_of vms-linux-x64)"
+bottle_darwin_arm64="$(sum_of "vms-${version}.arm64_ventura.bottle.tar.gz")"
+bottle_darwin_x64="$(sum_of "vms-${version}.ventura.bottle.tar.gz")"
+bottle_linux_x64="$(sum_of "vms-${version}.x86_64_linux.bottle.tar.gz")"
 
 cat <<FORMULA
 class Vms < Formula
@@ -33,6 +36,13 @@ class Vms < Formula
   homepage "https://vms.dev/docs/reference/cli"
   version "${version}"
   license "MIT"
+
+  bottle do
+    root_url "${base_url}"
+    sha256 cellar: :any_skip_relocation, arm64_ventura: "${bottle_darwin_arm64}"
+    sha256 cellar: :any_skip_relocation, ventura:       "${bottle_darwin_x64}"
+    sha256 cellar: :any_skip_relocation, x86_64_linux:  "${bottle_linux_x64}"
+  end
 
   on_macos do
     on_arm do
